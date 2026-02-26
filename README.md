@@ -17,6 +17,7 @@ NDL-OCR Lite already provides the complete OCR pipeline: layout recognition, cha
 - **MCP-native** — Exposed as an MCP tool through AgentCore Gateway; agents discover and call it like any other tool
 - **One-click deploy** — Deploy the entire stack from the AWS CloudFormation console with no local tooling required
 - **Serverless** — Runs on AWS Lambda with no servers to manage; scales to zero when idle
+- **Fast cold starts** — Lambda SnapStart snapshots loaded ONNX models, reducing cold starts from ~7s to ~2-3s
 
 ## Architecture Overview
 
@@ -33,10 +34,10 @@ NDL-OCR Lite already provides the complete OCR pipeline: layout recognition, cha
                                                                  └─────────────────┘
 ```
 
-The Lambda handler extracts NDL-OCR Lite's pipeline components and caches ONNX models at module level — avoiding the ~5s model reload that `process()` incurs on every call:
+The Lambda handler extracts NDL-OCR Lite's pipeline components and caches ONNX models at module level. **Lambda SnapStart** snapshots these loaded models at publish time — so even cold starts restore in under 1 second instead of reloading for 5 seconds:
 
-1. **Cold start (once):** Load 4 ONNX models into memory (~5s, persisted across warm invocations)
-2. **Per invocation (~2s warm):** Receive image/PDF (base64 or S3 URI)
+1. **Publish (once):** Load 4 ONNX models, SnapStart takes a microVM snapshot
+2. **Every invocation (~2s):** Restore from snapshot (cold) or reuse (warm) — receive image/PDF (base64 or S3 URI)
 3. If PDF, render pages to images using `pypdfium2` (~0.16s/page)
 4. Run `detector.detect()` → reading order → `process_cascade()` using cached models
 5. Return structured JSON result to agent
@@ -81,7 +82,7 @@ Then ask your agent: *"Read the text from this scanned page"* and attach an imag
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+ (required for Lambda SnapStart)
 - Node.js 18+ and npm (for CDK)
 - AWS CLI configured with credentials
 - AWS CDK CLI (`npm install -g aws-cdk`)
@@ -96,8 +97,8 @@ ndl-ocr-lite-lambda/
 │   └── design.md                # AWS architecture design
 ├── lambda/
 │   ├── handler.py               # Lambda entry point (thin wrapper)
-│   ├── Dockerfile               # Container image with NDL-OCR Lite
-│   └── requirements.txt         # Python dependencies (extends NDL-OCR Lite's)
+│   ├── requirements.txt         # Python dependencies (extends NDL-OCR Lite's)
+│   └── layer/                   # Lambda Layer: ONNX models + dependencies
 ├── cdk/
 │   ├── app.py                   # CDK app entry point
 │   └── stacks/

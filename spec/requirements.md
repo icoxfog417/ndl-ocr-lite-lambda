@@ -96,11 +96,13 @@ This project does **not** reimplement any OCR logic. Our job is the transport la
 Measured on dev machine (CPU). Lambda times may differ but relative proportions hold.
 
 - Warm invocation (models cached): ~2s per page (detection 0.9s + recognition 0.6s + overhead)
-- Cold start: ~7s for first page (5.2s model load + 1.6s inference)
+- Cold start with SnapStart: ~2-3s for first page (models restored from snapshot in <1s + 1.6s inference)
+- Cold start without SnapStart: ~7s for first page (5.2s model load + 1.6s inference)
 - PDF page rendering: ~0.16s/page via pypdfium2 (negligible)
-- Single-page OCR latency target: < 10 seconds (p95, warm)
+- Single-page OCR latency target: < 5 seconds (p95, including SnapStart cold starts)
 - Lambda memory: 3008 MB (peak RSS measured at 930 MB; headroom for large images)
-- Lambda timeout: 60 seconds (allows ~25 warm pages or ~8 cold-start pages)
+- Lambda timeout: 60 seconds (allows ~25 pages per invocation)
+- SnapStart: Enabled by default (Python 3.12 managed runtime). Snapshots initialized ONNX models at publish time, eliminating the ~5s model load penalty on cold starts.
 
 ### NFR-2: Scalability
 
@@ -141,6 +143,7 @@ Measured on dev machine (CPU). Lambda times may differ but relative proportions 
 - **CPU-only inference**: NDL-OCR Lite runs on CPU (ONNX Runtime). This is a deliberate trade-off for simplicity and cost over raw speed.
 - **Japanese-focused**: NDL-OCR Lite is optimized for Japanese text. Recognition of other languages is not guaranteed.
 - **Lambda timeout**: 60-second timeout limits the number of PDF pages processable in a single invocation. Large PDFs should use the `pages` parameter to process in batches.
+- **Managed runtime (zip deployment)**: SnapStart requires Python 3.12 managed runtime — container images are not supported. Model weights (150 MB) fit within Lambda's 250 MB unzipped limit. Container image mode is available as an alternative (with Provisioned Concurrency instead of SnapStart).
 - **Thin wrapper only**: This project does not modify, extend, or re-implement any NDL-OCR Lite logic. If the library has a limitation, so does this service.
 
 ## Out of Scope (v1)
