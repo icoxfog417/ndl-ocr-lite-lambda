@@ -74,7 +74,7 @@ The 12.73s includes ~5s of initial model loading + per-image DEIM reloads. With 
 
 Plus config files: `NDLmoji.yaml` (42 KB), `ndl.yaml` (299 B).
 
-**Impact on design:** 150 MB total is much smaller than the 500 MB+ estimate in the original design. This fits within Lambda's 250 MB zip limit if we exclude unnecessary dependencies. **Container image may not be strictly required** — a Lambda layer + zip deployment could work. However, container image is still recommended for reproducibility and to bundle Python + all deps cleanly.
+**Impact on design:** 150 MB total is much smaller than the 500 MB+ estimate in the original design. This fits within Lambda's 250 MB zip limit if we exclude unnecessary dependencies. **This enables zip + Lambda Layer packaging**, which in turn unlocks Lambda SnapStart (requires managed runtime, not container image). The decision to use zip + layer over container image is driven by SnapStart's near-zero cold start benefit.
 
 ---
 
@@ -237,7 +237,7 @@ if not os.path.exists(args.output):
 | # | Decision | Recommendation |
 |---|----------|----------------|
 | 1 | **Call `process()` directly or extract pipeline?** | Extract pipeline. Load models at module level, call detection/recognition directly. Saves ~5s per warm invocation. |
-| 2 | **Container image or zip deployment?** | Container image. Models are 150 MB (fits in zip), but container gives reproducibility + simpler bundling of ONNX Runtime + system libs. |
+| 2 | **Container image or zip deployment?** | Zip + Lambda Layer. Models are 150 MB (fits in 250 MB limit). Enables SnapStart for near-zero cold starts. Container image is the fallback if models exceed 250 MB in future. |
 | 3 | **Memory allocation?** | 2048 MB minimum, 3008 MB recommended. Peak RSS is ~930 MB for a single page. |
 | 4 | **PDF handling?** | Lambda handler renders pages with pypdfium2, saves as JPG to `/tmp`, feeds to pipeline. |
 | 5 | **Error handling?** | Don't rely on exceptions from OCR library. Verify output files exist. |

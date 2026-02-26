@@ -10,14 +10,14 @@ Users have scanned books, photographed documents, archived PDFs, and printed pag
 
 NDL-OCR Lite is a complete OCR pipeline developed by Japan's National Diet Library. The library handles:
 
-- **Layout recognition** — DEIMv2 detects 18 region classes (body, headings, captions, tables, etc.)
+- **Layout recognition** — DEIMv2 detects 17 region classes (body, headings, captions, tables, etc.)
 - **Character recognition** — PARSeq cascade (3 models of increasing capacity) with thread-pool parallelism
 - **Reading order** — XY-Cut algorithm sequences detected regions into logical reading order
 - **Structured output** — JSON with per-line bounding boxes, text, confidence, and vertical/horizontal detection
 - **Image formats** — JPG, PNG, TIFF, JP2, BMP
 - **PDF rendering** — pypdfium2 is already a bundled dependency
 
-This project does **not** reimplement any OCR logic. Our job is the transport layer: receive input, pass it to `process()`, return the output.
+This project does **not** reimplement any OCR logic. Our job is the transport layer: receive input, run it through the OCR pipeline, return the output.
 
 ## User Stories
 
@@ -30,10 +30,10 @@ This project does **not** reimplement any OCR logic. Our job is the transport la
 **Acceptance Criteria:**
 
 - AC-1.1: The `image` parameter accepts base64-encoded image data (JPG, PNG, TIFF, JP2, BMP) or an S3 URI (`s3://bucket/key`)
-- AC-1.2: The Lambda writes the image to `/tmp`, calls NDL-OCR Lite's `process()`, and returns the JSON output
+- AC-1.2: The Lambda writes the image to `/tmp`, runs it through the extracted NDL-OCR Lite pipeline (using cached models), and returns the JSON output
 - AC-1.3: The response includes per-line text, bounding boxes, confidence scores, and image dimensions (NDL-OCR Lite's native JSON format)
 - AC-1.4: OCR accuracy is identical to running NDL-OCR Lite standalone (no quality degradation from the Lambda wrapper)
-- AC-1.5: Single-page response is returned within 10 seconds (p95, warm invocation ~2s)
+- AC-1.5: Single-page response is returned within 5 seconds (p95, including SnapStart cold starts)
 
 ### US-2: OCR a PDF via AI agent
 
@@ -45,7 +45,7 @@ This project does **not** reimplement any OCR logic. Our job is the transport la
 
 - AC-2.1: The `image` parameter accepts base64-encoded PDF data or an S3 URI pointing to a PDF
 - AC-2.2: The Lambda splits the PDF into page images using `pypdfium2` (already bundled in NDL-OCR Lite)
-- AC-2.3: Each page image is passed to NDL-OCR Lite's `process()` individually
+- AC-2.3: Each page image is processed through the extracted NDL-OCR Lite pipeline (using cached models)
 - AC-2.4: The `pages` parameter allows selecting a page range (e.g. `1-3`, `1,3,5`); default is all pages
 - AC-2.5: The response contains a `pages` array with one entry per processed page
 
