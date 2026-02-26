@@ -78,21 +78,17 @@
         "inlinePayload": [
           {
             "name": "ocr_extract_text",
-            "description": "Extract text from an image of a scanned document using NDL-OCR Lite. Supports Japanese text with layout analysis.",
+            "description": "Extract text from an image or PDF using NDL-OCR Lite. Supports Japanese text. Returns per-line text with bounding boxes and confidence scores.",
             "inputSchema": {
               "type": "object",
               "properties": {
                 "image": {
                   "type": "string",
-                  "description": "Base64-encoded image data or S3 URI (s3://bucket/key)"
+                  "description": "Base64-encoded image/PDF data or S3 URI (s3://bucket/key). Supports JPG, PNG, TIFF, JP2, BMP, and PDF."
                 },
-                "format": {
+                "pages": {
                   "type": "string",
-                  "description": "Image format hint: jpg, png, tiff, jp2, bmp"
-                },
-                "include_layout": {
-                  "type": "boolean",
-                  "description": "If true, return layout regions with bounding boxes"
+                  "description": "Page range for PDFs (e.g. '1-3', '1,3,5'). Default: all pages. Ignored for images."
                 }
               },
               "required": ["image"]
@@ -107,9 +103,9 @@
 
 **Important:** The Lambda function accepts `Map<String, String>` parameters (not `APIGatewayProxyRequestEvent`), as AgentCore Gateway does not populate path parameters.
 
-### 2. AWS Lambda Function (OCR Processing)
+### 2. AWS Lambda Function (Thin Wrapper)
 
-**Role:** Runs NDL-OCR Lite to extract text from images.
+**Role:** Receives input from Gateway, passes images to NDL-OCR Lite's `process()`, returns results.
 
 **Runtime Configuration:**
 - Runtime: Python 3.10
@@ -120,27 +116,34 @@
 
 **Processing Flow:**
 
+The Lambda handler is intentionally thin. NDL-OCR Lite's `process()` handles all OCR logic.
+
 ```
-Request received
+Request received (image or PDF, base64 or S3 URI)
+       │
+       ├── base64? ──► decode to /tmp/input/
+       │
+       ├── S3 URI? ──► download from S3 to /tmp/input/
+       │
+       ├── PDF? ──────► split into page images via pypdfium2
+       │                write each page to /tmp/input/
        │
        ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ Parse input  │────►│ Load image   │────►│ Run OCR      │
-│              │     │              │     │ pipeline     │
-│ - base64     │     │ - decode     │     │              │
-│ - S3 URI     │     │ - from S3    │     │ 1. Layout    │
-│ - format     │     │ - validate   │     │ 2. Char rec  │
-└──────────────┘     └──────────────┘     │ 3. Ordering  │
-                                          └──────┬───────┘
-                                                 │
-                                                 ▼
-                                          ┌──────────────┐
-                                          │ Format       │
-                                          │ response     │
-                                          │              │
-                                          │ - text       │
-                                          │ - regions    │
-                                          └──────────────┘
+┌──────────────────────────────────────────────┐
+│  NDL-OCR Lite process()                      │
+│                                              │
+│  args.sourcedir = /tmp/input/                │
+│  args.output    = /tmp/output/               │
+│                                              │
+│  (library handles layout detection,          │
+│   character recognition cascade,             │
+│   reading order, JSON/XML/TXT output)        │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+              Read /tmp/output/*.json
+              Assemble into response
+              Return { pages: [...] }
 ```
 
 **NDL-OCR Lite Pipeline Detail:**
@@ -305,9 +308,8 @@ Provisions the MCP interface and authentication layer. Depends on `OcrLambdaStac
   "params": {
     "name": "ocr_extract_text",
     "arguments": {
-      "image": "<base64-encoded image or s3://bucket/key>",
-      "format": "jpg",
-      "include_layout": false
+      "image": "<base64-encoded image/PDF or s3://bucket/key>",
+      "pages": "1-3"
     }
   }
 }
@@ -318,24 +320,47 @@ Provisions the MCP interface and authentication layer. Depends on `OcrLambdaStac
 ```json
 {
   "image": "<base64 or s3://...>",
-  "format": "jpg",
-  "include_layout": false
+  "pages": "1-3"
 }
 ```
 
-**3. Lambda processes and returns:**
+**3. Lambda handler:**
+- Decodes/downloads the input to `/tmp/input/`
+- If PDF: splits into page images via `pypdfium2`, applies `pages` filter
+- Calls `process(args)` with `args.sourcedir=/tmp/input/`, `args.output=/tmp/output/`
+- Reads the generated `*.json` files from `/tmp/output/`
+
+**4. Lambda returns NDL-OCR Lite's native JSON output:**
 
 ```json
 {
   "statusCode": 200,
   "body": {
-    "text": "Extracted text in reading order...",
-    "regions": []
+    "pages": [
+      {
+        "page": 1,
+        "text": "Full text in reading order...",
+        "imginfo": {
+          "img_width": 2000,
+          "img_height": 3000
+        },
+        "contents": [
+          {
+            "id": 0,
+            "text": "Line text",
+            "boundingBox": [[x1,y1],[x1,y2],[x2,y1],[x2,y2]],
+            "isVertical": "true",
+            "isTextline": "true",
+            "confidence": 0.95
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-**4. Gateway wraps response as MCP tool result and returns to agent.**
+**5. Gateway wraps response as MCP tool result and returns to agent.**
 
 ## Security Design
 
@@ -384,8 +409,7 @@ Zero cost when idle (no requests = no Lambda invocations).
 
 These are **not** in scope for v1 but inform the architecture decisions:
 
-- **PDF support:** Add a preprocessing Lambda that converts PDF pages to images before feeding into OCR
-- **Batch processing:** Use Step Functions to orchestrate multi-page document processing
+- **Async batch processing:** Use Step Functions to orchestrate large PDF processing beyond Lambda timeout limits
 - **GPU acceleration:** Swap to a GPU-enabled Lambda or Fargate task for higher throughput
 - **Multi-language:** Swap or augment OCR models when NDL-OCR Lite adds language support
 - **Caching:** Add DynamoDB or ElastiCache to avoid re-processing identical images

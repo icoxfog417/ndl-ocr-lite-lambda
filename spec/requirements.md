@@ -4,49 +4,52 @@
 
 **Allow your desktop agent to read anything you have.**
 
-Users have scanned books, photographed documents, archived PDFs, and printed pages that contain valuable information locked in images. Today's AI agents can reason, summarize, and answer questions — but they cannot read scanned text accurately on their own. This project bridges that gap by giving any MCP-compatible agent access to a production-grade OCR engine, deployed in minutes with no infrastructure expertise.
+Users have scanned books, photographed documents, archived PDFs, and printed pages that contain valuable information locked in images. Today's AI agents can reason, summarize, and answer questions — but they cannot read scanned text accurately on their own. This project bridges that gap by giving any MCP-compatible agent access to [NDL-OCR Lite](https://github.com/ndl-lab/ndlocr-lite), deployed in minutes with no infrastructure expertise.
+
+## What NDL-OCR Lite already provides
+
+NDL-OCR Lite is a complete OCR pipeline developed by Japan's National Diet Library. The library handles:
+
+- **Layout recognition** — DEIMv2 detects 18 region classes (body, headings, captions, tables, etc.)
+- **Character recognition** — PARSeq cascade (3 models of increasing capacity) with thread-pool parallelism
+- **Reading order** — XY-Cut algorithm sequences detected regions into logical reading order
+- **Structured output** — JSON with per-line bounding boxes, text, confidence, and vertical/horizontal detection
+- **Image formats** — JPG, PNG, TIFF, JP2, BMP
+- **PDF rendering** — pypdfium2 is already a bundled dependency
+
+This project does **not** reimplement any OCR logic. Our job is the transport layer: receive input, pass it to `process()`, return the output.
 
 ## User Stories
 
-### US-1: Extract text from a scanned image
+### US-1: OCR an image via AI agent
 
 > As an **end user** working with an AI agent,
-> I want to **send an image of a scanned document to my agent and receive the extracted text**,
+> I want to **send an image of a document and receive the extracted text**,
 > so that I can **search, summarize, or ask questions about content that only exists as images**.
 
 **Acceptance Criteria:**
 
-- AC-1.1: The user can paste or attach a JPG, PNG, TIFF, JP2, or BMP image in their agent conversation
-- AC-1.2: The agent calls the `ocr_extract_text` MCP tool and returns the recognized text
-- AC-1.3: The extracted text preserves the original reading order of the document
-- AC-1.4: Japanese text is recognized accurately (character error rate comparable to NDL-OCR Lite standalone)
-- AC-1.5: The response is returned within 30 seconds for a typical single-page document image
+- AC-1.1: The `image` parameter accepts base64-encoded image data (JPG, PNG, TIFF, JP2, BMP) or an S3 URI (`s3://bucket/key`)
+- AC-1.2: The Lambda writes the image to `/tmp`, calls NDL-OCR Lite's `process()`, and returns the JSON output
+- AC-1.3: The response includes per-line text, bounding boxes, confidence scores, and image dimensions (NDL-OCR Lite's native JSON format)
+- AC-1.4: OCR accuracy is identical to running NDL-OCR Lite standalone (no quality degradation from the Lambda wrapper)
+- AC-1.5: Single-page response is returned within 30 seconds (p95)
 
-### US-2: Understand document layout
+### US-2: OCR a PDF via AI agent
 
-> As an **end user** analyzing a complex document,
-> I want to **receive layout information (headings, body text, captions) along with the extracted text**,
-> so that I can **understand the structure of the document, not just its raw text**.
-
-**Acceptance Criteria:**
-
-- AC-2.1: When `include_layout` is set to `true`, the response includes bounding box regions with type labels
-- AC-2.2: Region types include at minimum: `title`, `body`, `caption`, `header`, `footer`
-- AC-2.3: Each region contains its extracted text and coordinates
-
-### US-3: Process images stored in S3
-
-> As an **end user** with a large document archive,
-> I want to **point my agent at images already stored in S3**,
-> so that I can **process existing archives without re-uploading files**.
+> As an **end user** with a multi-page PDF,
+> I want to **send a PDF and receive the extracted text for each page**,
+> so that I can **work with scanned books and multi-page documents without manual page splitting**.
 
 **Acceptance Criteria:**
 
-- AC-3.1: The `image` parameter accepts S3 URIs in the format `s3://bucket/key`
-- AC-3.2: The Lambda function reads the image from S3 using its execution role
-- AC-3.3: Access is limited to the designated S3 bucket created by the stack
+- AC-2.1: The `image` parameter accepts base64-encoded PDF data or an S3 URI pointing to a PDF
+- AC-2.2: The Lambda splits the PDF into page images using `pypdfium2` (already bundled in NDL-OCR Lite)
+- AC-2.3: Each page image is passed to NDL-OCR Lite's `process()` individually
+- AC-2.4: The `pages` parameter allows selecting a page range (e.g. `1-3`, `1,3,5`); default is all pages
+- AC-2.5: The response contains a `pages` array with one entry per processed page
 
-### US-4: Deploy with one click
+### US-3: Deploy with one click
 
 > As a **developer or team lead**,
 > I want to **deploy the entire OCR service by launching a single CloudFormation stack**,
@@ -54,14 +57,14 @@ Users have scanned books, photographed documents, archived PDFs, and printed pag
 
 **Acceptance Criteria:**
 
-- AC-4.1: A single CloudFormation template can be launched from the AWS Console
-- AC-4.2: The only required parameters are stack name and notification email
-- AC-4.3: CodeBuild runs CDK to provision all resources (Lambda, S3, AgentCore Gateway)
-- AC-4.4: An email notification is sent when deployment completes
-- AC-4.5: The stack outputs include the MCP endpoint URL ready for agent configuration
-- AC-4.6: Total deployment time is under 15 minutes
+- AC-3.1: A single CloudFormation template can be launched from the AWS Console
+- AC-3.2: The only required parameters are stack name and notification email
+- AC-3.3: CodeBuild runs CDK to provision all resources (Lambda, S3, AgentCore Gateway, Cognito)
+- AC-3.4: An email notification is sent when deployment completes
+- AC-3.5: The stack outputs include the MCP endpoint URL ready for agent configuration
+- AC-3.6: Total deployment time is under 15 minutes
 
-### US-5: Connect agent to MCP endpoint
+### US-4: Connect agent to MCP endpoint
 
 > As a **developer**,
 > I want to **add the MCP endpoint URL to my agent's configuration and immediately start using OCR**,
@@ -69,12 +72,12 @@ Users have scanned books, photographed documents, archived PDFs, and printed pag
 
 **Acceptance Criteria:**
 
-- AC-5.1: The MCP endpoint URL is available in CloudFormation stack outputs
-- AC-5.2: The endpoint is compatible with the MCP specification used by Claude Desktop, Cline, and other MCP clients
-- AC-5.3: The agent can discover the `ocr_extract_text` tool via standard MCP tool listing
-- AC-5.4: Authentication is handled via AgentCore Gateway's OAuth layer
+- AC-4.1: The MCP endpoint URL is available in CloudFormation stack outputs
+- AC-4.2: The endpoint is compatible with the MCP specification used by Claude Desktop, Cline, and other MCP clients
+- AC-4.3: The agent can discover the `ocr_extract_text` tool via standard MCP tool listing
+- AC-4.4: Authentication is handled via AgentCore Gateway's Cognito OAuth layer
 
-### US-6: Deploy via CDK for customization
+### US-5: Deploy via CDK for customization
 
 > As a **developer** who needs to customize the deployment,
 > I want to **deploy using CDK directly from my local machine**,
@@ -82,9 +85,9 @@ Users have scanned books, photographed documents, archived PDFs, and printed pag
 
 **Acceptance Criteria:**
 
-- AC-6.1: `cdk deploy --all` provisions the complete stack
-- AC-6.2: Stack parameters can be overridden via CDK context or environment variables
-- AC-6.3: The CDK app is structured with separate stacks for Lambda/S3 and Gateway concerns
+- AC-5.1: `cdk deploy --all` provisions the complete stack
+- AC-5.2: Stack parameters can be overridden via CDK context or environment variables
+- AC-5.3: The CDK app is structured with separate stacks for Lambda/S3 and Gateway concerns
 
 ## Non-Functional Requirements
 
@@ -130,15 +133,16 @@ Users have scanned books, photographed documents, archived PDFs, and printed pag
 
 ## Constraints
 
-- **Image size limit**: Lambda payload limit is 6 MB for synchronous invocations. Images larger than 6 MB must be uploaded to S3 first and referenced by URI.
+- **Payload size limit**: Lambda payload limit is 6 MB for synchronous invocations. Images/PDFs larger than 6 MB must be uploaded to S3 first and referenced by URI.
 - **CPU-only inference**: NDL-OCR Lite runs on CPU (ONNX Runtime). This is a deliberate trade-off for simplicity and cost over raw speed.
 - **Japanese-focused**: NDL-OCR Lite is optimized for Japanese text. Recognition of other languages is not guaranteed.
-- **Single-page processing**: Each invocation processes one image. Batch/multi-page processing is out of scope for v1.
+- **Lambda timeout**: 60-second timeout limits the number of PDF pages processable in a single invocation. Large PDFs should use the `pages` parameter to process in batches.
+- **Thin wrapper only**: This project does not modify, extend, or re-implement any NDL-OCR Lite logic. If the library has a limitation, so does this service.
 
 ## Out of Scope (v1)
 
-- PDF input support (PDF-to-image conversion is a separate concern)
-- Multi-page batch processing
 - Real-time streaming of OCR results
 - Fine-tuning or retraining of OCR models
 - Multi-language OCR beyond Japanese
+- Asynchronous / background processing of large PDF batches
+- Custom post-processing of OCR output (e.g. spell correction, format conversion)

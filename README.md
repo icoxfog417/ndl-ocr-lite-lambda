@@ -6,15 +6,17 @@ One-click deployable OCR service that brings [NDL-OCR Lite](https://github.com/n
 
 ## What is this?
 
-This project packages Japan's National Diet Library OCR engine (NDL-OCR Lite) as an AWS Lambda function and exposes it through AgentCore Gateway as an MCP (Model Context Protocol) tool. Any MCP-compatible AI agent — Claude Desktop, Cline, your custom agent — can call this tool to extract text from images of books, documents, and scanned pages.
+This project wraps [NDL-OCR Lite](https://github.com/ndl-lab/ndlocr-lite) — Japan's National Diet Library OCR engine — in a thin AWS Lambda handler and exposes it as an MCP (Model Context Protocol) tool through AgentCore Gateway. Any MCP-compatible AI agent (Claude Desktop, Cline, your custom agent) can call this tool to extract text from images and PDFs of books, documents, and scanned pages.
+
+NDL-OCR Lite already provides the complete OCR pipeline: layout recognition, character recognition, reading order sequencing, and structured output. This project's job is to **make that pipeline callable from any AI agent with one-click deployment**.
 
 ### Key Features
 
-- **Accurate Japanese OCR** — Powered by NDL-OCR Lite's three-stage pipeline: layout recognition (DEIMv2), character recognition (PARSeq), and reading order sequencing
+- **Accurate Japanese OCR** — Powered by NDL-OCR Lite (DEIMv2 layout detection, PARSeq character recognition cascade, XY-Cut reading order)
+- **Image and PDF support** — Accepts JPG, PNG, TIFF, JP2, BMP images and multi-page PDFs (split into pages via pypdfium2, already bundled in NDL-OCR Lite)
 - **MCP-native** — Exposed as an MCP tool through AgentCore Gateway; agents discover and call it like any other tool
 - **One-click deploy** — Deploy the entire stack from the AWS CloudFormation console with no local tooling required
 - **Serverless** — Runs on AWS Lambda with no servers to manage; scales to zero when idle
-- **Multi-format support** — Accepts JPG, PNG, TIFF, JP2, and BMP images
 
 ## Architecture Overview
 
@@ -31,6 +33,13 @@ This project packages Japan's National Diet Library OCR engine (NDL-OCR Lite) as
                                                                  └─────────────────┘
 ```
 
+The Lambda handler is a thin wrapper around NDL-OCR Lite's `process()` function:
+
+1. Receive image (base64) or S3 URI or PDF (base64)
+2. If PDF, split into page images using `pypdfium2`
+3. Write image(s) to `/tmp`, call NDL-OCR Lite's `process()`
+4. Read the output JSON, return structured result to agent
+
 The full architecture is documented in [spec/design.md](spec/design.md).
 
 ## Quick Start (One-Click Deploy)
@@ -45,7 +54,7 @@ The full architecture is documented in [spec/design.md](spec/design.md).
 1. Click the **Launch Stack** button below (or upload `deployments/template.yaml` to CloudFormation)
 2. Fill in the parameters (stack name, notification email)
 3. Acknowledge IAM capability creation and launch the stack
-4. Wait for the completion email (~10–15 minutes)
+4. Wait for the completion email (~10-15 minutes)
 5. Copy the MCP endpoint URL from the stack outputs
 
 <!-- TODO: Add Launch Stack button once deployment region is finalized -->
@@ -85,14 +94,14 @@ ndl-ocr-lite-lambda/
 │   ├── requirements.md          # User stories and requirements
 │   └── design.md                # AWS architecture design
 ├── lambda/
-│   ├── handler.py               # Lambda entry point
-│   ├── ocr_engine.py            # NDL-OCR Lite integration
-│   └── requirements.txt         # Python dependencies
+│   ├── handler.py               # Lambda entry point (thin wrapper)
+│   ├── Dockerfile               # Container image with NDL-OCR Lite
+│   └── requirements.txt         # Python dependencies (extends NDL-OCR Lite's)
 ├── cdk/
 │   ├── app.py                   # CDK app entry point
 │   └── stacks/
 │       ├── ocr_lambda_stack.py  # Lambda + S3 stack
-│       └── gateway_stack.py     # AgentCore Gateway stack
+│       └── gateway_stack.py     # AgentCore Gateway + Cognito stack
 ├── deployments/
 │   ├── template.yaml            # CloudFormation one-click template
 │   └── buildspec.yml            # CodeBuild spec for CDK deploy
@@ -133,26 +142,39 @@ The Lambda exposes the following MCP tool through AgentCore Gateway:
 
 ### `ocr_extract_text`
 
-Extract text from an image using NDL-OCR Lite.
+Extract text from an image or PDF using NDL-OCR Lite.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `image` | string | Yes | Base64-encoded image data or S3 URI (`s3://bucket/key`) |
-| `format` | string | No | Image format hint (`jpg`, `png`, `tiff`, `jp2`, `bmp`). Auto-detected if omitted |
-| `include_layout` | boolean | No | If `true`, return layout regions with bounding boxes. Default: `false` |
+| `image` | string | Yes | Base64-encoded image/PDF data or S3 URI (`s3://bucket/key`) |
+| `pages` | string | No | Page range for PDFs (e.g. `1-3`, `1,3,5`). Default: all pages |
 
 **Response:**
 
+The response is based on NDL-OCR Lite's native JSON output:
+
 ```json
 {
-  "text": "Extracted full text in reading order...",
-  "regions": [
+  "pages": [
     {
-      "text": "Region text",
-      "bbox": [x1, y1, x2, y2],
-      "type": "body"
+      "page": 1,
+      "text": "Full text in reading order...",
+      "imginfo": {
+        "img_width": 2000,
+        "img_height": 3000
+      },
+      "contents": [
+        {
+          "id": 0,
+          "text": "Line text",
+          "boundingBox": [[x1,y1],[x1,y2],[x2,y1],[x2,y2]],
+          "isVertical": "true",
+          "isTextline": "true",
+          "confidence": 0.95
+        }
+      ]
     }
   ]
 }
@@ -165,7 +187,7 @@ Extract text from an image using NDL-OCR Lite.
 
 ## References
 
-- [NDL-OCR Lite](https://github.com/ndl-lab/ndlocr-lite) — National Diet Library OCR engine
+- [NDL-OCR Lite](https://github.com/ndl-lab/ndlocr-lite) — National Diet Library OCR engine (CC BY 4.0)
 - [Amazon Bedrock AgentCore Gateway](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html) — Managed MCP gateway service
 - [One-Click Generative AI Solutions](https://github.com/aws-samples/sample-one-click-generative-ai-solutions) — One-click deployment pattern reference
 
@@ -173,4 +195,4 @@ Extract text from an image using NDL-OCR Lite.
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
-NDL-OCR Lite models and code are subject to the [NDL-OCR Lite license](https://github.com/ndl-lab/ndlocr-lite/blob/main/LICENSE).
+NDL-OCR Lite models and code are licensed under [CC BY 4.0](https://github.com/ndl-lab/ndlocr-lite/blob/master/LICENSE).
