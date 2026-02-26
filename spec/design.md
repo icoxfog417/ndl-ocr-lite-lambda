@@ -103,76 +103,128 @@
 
 **Important:** The Lambda function accepts `Map<String, String>` parameters (not `APIGatewayProxyRequestEvent`), as AgentCore Gateway does not populate path parameters.
 
-### 2. AWS Lambda Function (Thin Wrapper)
+### 2. AWS Lambda Function (Pipeline Extraction with Model Caching)
 
-**Role:** Receives input from Gateway, passes images to NDL-OCR Lite's `process()`, returns results.
+**Role:** Loads NDL-OCR Lite models once, reuses them across warm invocations.
+
+**Critical design decision:** NDL-OCR Lite's `process()` function reloads all 4 ONNX models (~5s) on every call. We do **not** call `process()` directly. Instead, we extract the pipeline components and cache models at module level (Lambda global scope), reducing warm invocation time from ~7s to ~2s.
+
+See [implementation_qa.md](implementation_qa.md) Q1/Q5 for measured data behind this decision.
 
 **Runtime Configuration:**
 - Runtime: Python 3.10
-- Memory: 3008 MB (required for ML model inference)
+- Memory: 3008 MB (peak RSS measured at 930 MB for single page; larger images need headroom)
 - Timeout: 60 seconds
+- Ephemeral storage: 512 MB (default, sufficient — see /tmp analysis below)
 - Architecture: x86_64
-- Packaging: Container image (to accommodate model weights exceeding 250 MB zip limit)
+- Packaging: Container image
+
+**Handler Architecture:**
+
+```python
+# --- Module level (loaded once on cold start, persisted across warm invocations) ---
+
+from deim import DEIM
+from parseq import PARSEQ
+# ... load config, charlist ...
+
+detector    = DEIM(model_path=..., class_mapping_path=..., ...)        # 1.0s
+recognizer30  = PARSEQ(model_path=..., charlist=charlist, device="cpu") # 0.5s
+recognizer50  = PARSEQ(model_path=..., charlist=charlist, device="cpu") # 0.8s
+recognizer100 = PARSEQ(model_path=..., charlist=charlist, device="cpu") # 2.1s
+# Total cold start model load: ~5.2s (one-time cost)
+
+# --- Handler (called per invocation) ---
+
+def handler(event, context):
+    # 1. Parse input (base64/S3 URI, detect PDF vs image)
+    # 2. If PDF: render pages to images via pypdfium2 (~0.16s/page)
+    # 3. For each image:
+    #    a. detector.detect(img)                          # ~0.9s (reuses cached model)
+    #    b. convert_to_xml_string3() + eval_xml()         # ~0.08s
+    #    c. process_cascade(lines, rec30, rec50, rec100)  # ~0.6s
+    #    d. Assemble JSON result
+    # 4. Return { pages: [...] }
+```
 
 **Processing Flow:**
 
-The Lambda handler is intentionally thin. NDL-OCR Lite's `process()` handles all OCR logic.
-
 ```
-Request received (image or PDF, base64 or S3 URI)
-       │
-       ├── base64? ──► decode to /tmp/input/
-       │
-       ├── S3 URI? ──► download from S3 to /tmp/input/
-       │
-       ├── PDF? ──────► split into page images via pypdfium2
-       │                write each page to /tmp/input/
-       │
-       ▼
-┌──────────────────────────────────────────────┐
-│  NDL-OCR Lite process()                      │
-│                                              │
-│  args.sourcedir = /tmp/input/                │
-│  args.output    = /tmp/output/               │
-│                                              │
-│  (library handles layout detection,          │
-│   character recognition cascade,             │
-│   reading order, JSON/XML/TXT output)        │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-              Read /tmp/output/*.json
-              Assemble into response
-              Return { pages: [...] }
+                    Cold start (first invocation only)
+                    ┌────────────────────────────┐
+                    │  Load 4 ONNX models (~5s)  │
+                    │  Persisted in memory for    │
+                    │  all subsequent invocations │
+                    └─────────────┬──────────────┘
+                                  │
+        ┌─────────────────────────┼─────────────────────────┐
+        │          Per invocation (~2s warm)                 │
+        │                                                   │
+        │  Request received                                 │
+        │       │                                           │
+        │       ├── base64 image ──► decode to numpy array  │
+        │       ├── base64 PDF ────► pypdfium2 render pages │
+        │       ├── S3 URI ────────► boto3 download         │
+        │       │                                           │
+        │       ▼                                           │
+        │  For each image:                                  │
+        │    detector.detect(img)         [0.9s]            │
+        │       │                                           │
+        │       ▼                                           │
+        │    convert_to_xml_string3()                       │
+        │    eval_xml() (reading order)   [0.08s]           │
+        │       │                                           │
+        │       ▼                                           │
+        │    process_cascade()            [0.6s]            │
+        │    (rec30 → rec50 → rec100)                       │
+        │       │                                           │
+        │       ▼                                           │
+        │    Assemble per-page JSON                         │
+        │    Strip img_path (local path leak)               │
+        │                                                   │
+        │       ▼                                           │
+        │    Return { pages: [...] }                        │
+        └───────────────────────────────────────────────────┘
 ```
 
-**NDL-OCR Lite Pipeline Detail:**
+**Measured Performance (dev machine, CPU):**
 
-The OCR engine runs a three-stage pipeline for each image:
+| Scenario | Model load | Inference | Total |
+|----------|-----------|-----------|-------|
+| Cold start, 1 page | 5.2s | 1.6s | **~7s** |
+| Warm invocation, 1 page | 0s | 1.6s | **~2s** |
+| Warm invocation, 3 pages | 0s | ~5s | **~5s** |
 
-1. **Layout Recognition (DEIMv2)** — `deim-s-1024x1024.onnx` detects 18 region classes including body text, headings, captions, tables, running headers, and page numbers. Outputs bounding boxes with confidence scores.
-2. **Reading Order (XY-Cut)** — Recursive bisection algorithm assigns logical reading order to detected regions.
-3. **Text Recognition (PARSeq cascade)** — Three ONNX models of increasing capacity:
-   - `parseq_30.onnx` (256px, ~30 chars) — tries first, escalates at 25+ chars
-   - `parseq_50.onnx` (384px, ~50 chars) — escalates at 45+ chars
-   - `parseq_100.onnx` (768px, ~100 chars) — terminal model
+**NDL-OCR Lite Pipeline (called per image, using cached models):**
 
-   Lines are routed to the smallest sufficient model first, with automatic escalation. Recognition within each tier uses thread-pool parallelism.
+1. **Layout detection** — `detector.detect(img)` using cached DEIM session. Detects 17 region classes (see `ndl.yaml`: text_block, line_main, line_caption, line_ad, line_note, block_fig, block_table, line_title, etc.).
+2. **XML assembly + reading order** — `convert_to_xml_string3()` builds XML from detections, `eval_xml()` applies XY-Cut recursive bisection to assign reading order.
+3. **Text recognition** — `process_cascade()` routes line images through 3 cached PARSeq models:
+   - `rec30` (256px) → tries first, escalates if result >= 25 chars
+   - `rec50` (384px) → escalates if result >= 45 chars
+   - `rec100` (768px) → terminal model
+   - Each tier uses `ThreadPoolExecutor` for parallel recognition
 
 **Lambda Container Image:**
 
 The container image bundles:
 - Python 3.10 runtime
-- NDL-OCR Lite source code and dependencies
-- ONNX Runtime 1.23+ (CPU)
-- Pillow, NumPy, lxml, networkx, PyYAML
-- Pre-trained ONNX model weights:
-  - `deim-s-1024x1024.onnx` (layout recognition)
-  - `parseq_30.onnx`, `parseq_50.onnx`, `parseq_100.onnx` (character recognition cascade)
-  - `NDLmoji.yaml` (character vocabulary)
+- NDL-OCR Lite source code (`ocr.py`, `deim.py`, `parseq.py`, `ndl_parser.py`, `reading_order/`)
+- Required dependencies: onnxruntime 1.23.2, Pillow, NumPy, lxml, networkx, PyYAML, pypdfium2, pyparsing, ordered-set
+- **Excluded** (GUI/unnecessary): flet, reportlab, dill, tqdm (~28 MB saved)
+- ONNX model weights (150 MB total):
+  - `deim-s-1024x1024.onnx` — 39 MB (layout detection)
+  - `parseq-ndl-16x256-30-tiny-192epoch-tegaki3.onnx` — 35 MB
+  - `parseq-ndl-16x384-50-tiny-146epoch-tegaki2.onnx` — 36 MB
+  - `parseq-ndl-16x768-100-tiny-165epoch-tegaki2.onnx` — 40 MB
+- Config: `NDLmoji.yaml` (42 KB character vocabulary), `ndl.yaml` (17 detection classes)
 
 **Why container image over zip:**
-NDL-OCR Lite's model weights (~500 MB+) exceed Lambda's 250 MB deployment package limit. Container images support up to 10 GB, providing ample room for models and dependencies.
+Model weights total 150 MB (not 500 MB+ as initially estimated), which could fit in a zip deployment. However, container image is still preferred because: (1) reproducible build with exact system libraries for ONNX Runtime, (2) simpler Dockerfile than managing Lambda layers, (3) headroom for future model updates.
+
+**`/tmp` Storage:**
+
+Per-image I/O is minimal (~320 KB: input image + JSON/XML/TXT output). Lambda's default 512 MB `/tmp` handles 20+ pages easily. The handler uses unique subdirectories per invocation (`/tmp/<request_id>/`) to prevent stale data from warm Lambda reuse, and cleans up after each invocation. Temp filenames use simple `page_001.jpg` format to avoid the library's dotted-filename bug (`split(".")[0]`).
 
 ### 3. Amazon S3 Bucket
 
@@ -324,13 +376,15 @@ Provisions the MCP interface and authentication layer. Depends on `OcrLambdaStac
 }
 ```
 
-**3. Lambda handler:**
-- Decodes/downloads the input to `/tmp/input/`
-- If PDF: splits into page images via `pypdfium2`, applies `pages` filter
-- Calls `process(args)` with `args.sourcedir=/tmp/input/`, `args.output=/tmp/output/`
-- Reads the generated `*.json` files from `/tmp/output/`
+**3. Lambda handler (uses cached models — no reload on warm invocations):**
+- Decodes base64 / downloads from S3 to numpy array
+- If PDF: renders selected pages to images via `pypdfium2` (~0.16s/page)
+- For each image: runs `detector.detect()` → `eval_xml()` → `process_cascade()` using cached models
+- Assembles per-page JSON, strips `img_path` (local filesystem path leak)
 
-**4. Lambda returns NDL-OCR Lite's native JSON output:**
+**4. Lambda returns structured response:**
+
+The response wraps NDL-OCR Lite's native JSON format. The `contents` array and field names (`boundingBox`, `isVertical`, `confidence`) come directly from the library — we pass through without transformation.
 
 ```json
 {
@@ -339,19 +393,19 @@ Provisions the MCP interface and authentication layer. Depends on `OcrLambdaStac
     "pages": [
       {
         "page": 1,
-        "text": "Full text in reading order...",
+        "text": "(z)気送子送付管\n気送子送付には、上記気送管にて...",
         "imginfo": {
-          "img_width": 2000,
-          "img_height": 3000
+          "img_width": 2048,
+          "img_height": 1446
         },
         "contents": [
           {
             "id": 0,
-            "text": "Line text",
-            "boundingBox": [[x1,y1],[x1,y2],[x2,y1],[x2,y2]],
+            "text": "(z)気送子送付管",
+            "boundingBox": [[380,229],[380,251],[569,229],[569,251]],
             "isVertical": "true",
             "isTextline": "true",
-            "confidence": 0.95
+            "confidence": 0.895
           }
         ]
       }
@@ -359,6 +413,11 @@ Provisions the MCP interface and authentication layer. Depends on `OcrLambdaStac
   }
 }
 ```
+
+**Known quirks in the library output (passed through as-is):**
+- `isVertical` is hardcoded to `"true"` for every line (library limitation in `ocr.py` line 226)
+- `confidence` is 0 for some region types (e.g., page numbers)
+- `boundingBox` is 4 corners `[[x1,y1],[x1,y2],[x2,y1],[x2,y2]]`, not `[x1,y1,x2,y2]`
 
 **5. Gateway wraps response as MCP tool result and returns to agent.**
 
@@ -385,25 +444,26 @@ Agent ──► AgentCore Gateway (OAuth 2.0 / Cognito) ──► Lambda (IAM in
 
 ### Data Handling
 
-- Images sent via base64 are processed in-memory and never persisted
+- Images are decoded to numpy arrays in memory; temp files in `/tmp/<request_id>/` are cleaned up after each invocation
+- `img_path` field is stripped from the response to prevent leaking Lambda filesystem paths
 - Images in S3 are auto-deleted after 24 hours via lifecycle policy
 - No OCR results are cached or stored by the service
 - CloudWatch logs may contain request metadata but never image content
 
 ## Cost Estimate
 
-For a workload of ~1,000 OCR requests per month:
+For a workload of ~1,000 single-page OCR requests per month (mostly warm invocations):
 
 | Service | Estimate | Notes |
 |---------|----------|-------|
-| Lambda | ~$1.50 | 1000 invocations x 15s avg x 3008 MB |
+| Lambda | ~$0.30 | 1000 invocations x ~3s avg x 3008 MB (warm: ~2s, cold: ~7s) |
 | S3 | ~$0.03 | Minimal storage with 24h lifecycle |
 | AgentCore Gateway | See pricing | Managed service pricing applies |
 | CloudWatch | ~$0.50 | Logs + metrics |
 | ECR | ~$0.10 | Container image storage |
-| **Total** | **~$2–3/month** | **+ AgentCore Gateway fees** |
+| **Total** | **~$1/month** | **+ AgentCore Gateway fees** |
 
-Zero cost when idle (no requests = no Lambda invocations).
+Zero cost when idle (no requests = no Lambda invocations). Model caching reduces cost by ~5x compared to calling `process()` directly (which would average ~7s/invocation).
 
 ## Future Considerations
 

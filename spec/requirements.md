@@ -33,7 +33,7 @@ This project does **not** reimplement any OCR logic. Our job is the transport la
 - AC-1.2: The Lambda writes the image to `/tmp`, calls NDL-OCR Lite's `process()`, and returns the JSON output
 - AC-1.3: The response includes per-line text, bounding boxes, confidence scores, and image dimensions (NDL-OCR Lite's native JSON format)
 - AC-1.4: OCR accuracy is identical to running NDL-OCR Lite standalone (no quality degradation from the Lambda wrapper)
-- AC-1.5: Single-page response is returned within 30 seconds (p95)
+- AC-1.5: Single-page response is returned within 10 seconds (p95, warm invocation ~2s)
 
 ### US-2: OCR a PDF via AI agent
 
@@ -93,10 +93,14 @@ This project does **not** reimplement any OCR logic. Our job is the transport la
 
 ### NFR-1: Performance
 
-- Single-page OCR latency: < 30 seconds (p95)
-- Lambda memory: configurable, default 3008 MB (needed for ML model inference)
-- Lambda timeout: 60 seconds
-- Cold start: < 15 seconds (using provisioned concurrency or SnapStart if available)
+Measured on dev machine (CPU). Lambda times may differ but relative proportions hold.
+
+- Warm invocation (models cached): ~2s per page (detection 0.9s + recognition 0.6s + overhead)
+- Cold start: ~7s for first page (5.2s model load + 1.6s inference)
+- PDF page rendering: ~0.16s/page via pypdfium2 (negligible)
+- Single-page OCR latency target: < 10 seconds (p95, warm)
+- Lambda memory: 3008 MB (peak RSS measured at 930 MB; headroom for large images)
+- Lambda timeout: 60 seconds (allows ~25 warm pages or ~8 cold-start pages)
 
 ### NFR-2: Scalability
 

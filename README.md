@@ -33,12 +33,13 @@ NDL-OCR Lite already provides the complete OCR pipeline: layout recognition, cha
                                                                  └─────────────────┘
 ```
 
-The Lambda handler is a thin wrapper around NDL-OCR Lite's `process()` function:
+The Lambda handler extracts NDL-OCR Lite's pipeline components and caches ONNX models at module level — avoiding the ~5s model reload that `process()` incurs on every call:
 
-1. Receive image (base64) or S3 URI or PDF (base64)
-2. If PDF, split into page images using `pypdfium2`
-3. Write image(s) to `/tmp`, call NDL-OCR Lite's `process()`
-4. Read the output JSON, return structured result to agent
+1. **Cold start (once):** Load 4 ONNX models into memory (~5s, persisted across warm invocations)
+2. **Per invocation (~2s warm):** Receive image/PDF (base64 or S3 URI)
+3. If PDF, render pages to images using `pypdfium2` (~0.16s/page)
+4. Run `detector.detect()` → reading order → `process_cascade()` using cached models
+5. Return structured JSON result to agent
 
 The full architecture is documented in [spec/design.md](spec/design.md).
 
