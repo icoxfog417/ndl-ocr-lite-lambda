@@ -213,9 +213,11 @@ class TestGatewayStack:
     def test_gateway_target_exists(self, template) -> None:
         template.resource_count_is("AWS::BedrockAgentCore::GatewayTarget", 1)
 
-    def test_cognito_m2m_auth(self, template) -> None:
-        template.resource_count_is("AWS::Cognito::UserPool", 1)
-        template.resource_count_is("AWS::Cognito::UserPoolClient", 1)
+    def test_iam_auth(self, template) -> None:
+        template.has_resource_properties(
+            "AWS::BedrockAgentCore::Gateway",
+            {"AuthorizerType": "AWS_IAM"},
+        )
 
     def test_schema_file_path_resolves(self) -> None:
         computed = CDK_DIR / "schemas" / "ocr-tool-schema.json"

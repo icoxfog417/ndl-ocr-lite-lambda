@@ -1,4 +1,4 @@
-"""GatewayStack: AgentCore Gateway with Cognito auth and Lambda MCP target."""
+"""GatewayStack: AgentCore Gateway with IAM auth and Lambda MCP target."""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ class GatewayStack(Stack):
     """Provisions AgentCore Gateway as an MCP endpoint for the OCR Lambda.
 
     The Gateway L2 construct auto-creates:
-    - Cognito User Pool with M2M client credentials flow
+    - IAM-based authorization (SigV4 signing)
     - IAM execution role for the Gateway service
     - Lambda invoke permissions for the target
 
-    Outputs include the MCP endpoint URL and Cognito credentials needed
-    for MCP client configuration.
+    Outputs include the MCP endpoint URL. Callers authenticate using
+    AWS credentials (SigV4) via mcp-proxy-for-aws.
     """
 
     def __init__(
@@ -39,13 +39,13 @@ class GatewayStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # --- AgentCore Gateway ---
-        # Default auth auto-creates Cognito User Pool with M2M client credentials.
-        # Default protocol is MCP.
+        # IAM auth enables SigV4 signing via mcp-proxy-for-aws.
         self.gateway = agentcore.Gateway(
             self,
             "OcrGateway",
             gateway_name=f"{stack_prefix}-gateway",
             description="MCP gateway for NDL-OCR Lite OCR service",
+            authorizer_configuration=agentcore.GatewayAuthorizer.using_aws_iam(),
             protocol_configuration=agentcore.McpProtocolConfiguration(
                 instructions=(
                     "This gateway provides OCR (optical character recognition) "
@@ -83,28 +83,4 @@ class GatewayStack(Stack):
             "McpEndpointUrl",
             value=f"https://{self.gateway.gateway_id}.gateway.bedrock-agentcore.{self.region}.amazonaws.com/mcp",
             description="MCP endpoint URL for agent configuration",
-        )
-        cdk.CfnOutput(
-            self,
-            "CognitoUserPoolId",
-            value=self.gateway.user_pool.user_pool_id,
-            description="Cognito User Pool ID for authentication",
-        )
-        cdk.CfnOutput(
-            self,
-            "CognitoAppClientId",
-            value=self.gateway.user_pool_client.user_pool_client_id,
-            description="Cognito App Client ID for M2M authentication",
-        )
-        cdk.CfnOutput(
-            self,
-            "TokenEndpointUrl",
-            value=self.gateway.token_endpoint_url,
-            description="Cognito OAuth token endpoint for obtaining access tokens",
-        )
-        cdk.CfnOutput(
-            self,
-            "OAuthScopes",
-            value=" ".join(self.gateway.oauth_scopes),
-            description="OAuth scopes to request when obtaining access tokens",
         )
