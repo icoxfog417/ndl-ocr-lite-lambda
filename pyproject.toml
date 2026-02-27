@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ndl-ocr-lite-lambda"
+version = "1.0.0"
+description = "NDL-OCR Lite wrapped in AWS Lambda, exposed as MCP tool"
+requires-python = ">=3.10"
+dependencies = [
+    "boto3",
+    "pillow>=12.0",
+    "numpy>=2.0",
+    "PyYAML>=6.0",
+    "pypdfium2>=4.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+]
+cdk = [
+    "aws-cdk-lib>=2.170.0",
+    "constructs>=10.0.0",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["lambda", "cdk", "tests"]
+
+[dependency-groups]
+cdk = [
+    "aws-cdk-aws-bedrock-agentcore-alpha>=2.240.0a0",
+    "aws-cdk-lib>=2.240.0",
+]
+dev = [
+    "pytest>=9.0.2",
+]

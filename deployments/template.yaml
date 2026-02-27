@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  One-click bootstrap for NDL-OCR Lite Lambda MCP service.
+  Creates a CodeBuild project that clones the repo, runs CDK, and deploys all resources.
+
+Parameters:
+  StackPrefix:
+    Type: String
+    Default: ndl-ocr
+    Description: Prefix for all resource names
+    AllowedPattern: '[a-z0-9-]+'
+    ConstraintDescription: Lowercase alphanumeric and hyphens only
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for deployment notifications
+    AllowedPattern: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    ConstraintDescription: Must be a valid email address
+
+  LambdaMemoryMB:
+    Type: Number
+    Default: 3008
+    Description: Lambda memory allocation in MB
+    MinValue: 2048
+    MaxValue: 10240
+
+  LambdaTimeoutSec:
+    Type: Number
+    Default: 60
+    Description: Lambda timeout in seconds
+    MinValue: 30
+    MaxValue: 900
+
+Resources:
+  # --- SNS Topic for notifications ---
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${StackPrefix}-deploy-notifications'
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # --- CodeBuild IAM Role ---
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${StackPrefix}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      Policies:
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref NotificationTopic
+
+  # --- CodeBuild Project (buildspec inlined for one-click deployment) ---
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${StackPrefix}-deploy'
+      Description: Deploys NDL-OCR Lite Lambda MCP service via CDK
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 30
+      Source:
+        Type: GITHUB
+        Location: https://github.com/icoxfog417/ndl-ocr-lite-lambda.git
+        # Buildspec is inlined so this template is fully self-contained.
+        # ${!VAR} escapes shell variables from CloudFormation's !Sub resolution.
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 18
+                python: 3.12
+              commands:
+                - npm install -g aws-cdk
+                - pip install uv
+                - git submodule update --init --recursive
+                - uv sync --group dev --group cdk
+                - cd cdk && uv sync && cd ..
+
+            pre_build:
+              commands:
+                - VENDOR_SRC=lambda/vendor/ndlocr-lite/src
+                - mkdir -p layers/ocr-models/python layers/ocr-models/src layers/ocr-models/model layers/ocr-models/config
+                - cp $VENDOR_SRC/ocr.py layers/ocr-models/src/
+                - cp $VENDOR_SRC/deim.py layers/ocr-models/src/
+                - cp $VENDOR_SRC/parseq.py layers/ocr-models/src/
+                - cp $VENDOR_SRC/ndl_parser.py layers/ocr-models/src/
+                - cp -r $VENDOR_SRC/reading_order layers/ocr-models/src/
+                - cp $VENDOR_SRC/model/*.onnx layers/ocr-models/model/
+                - cp $VENDOR_SRC/config/NDLmoji.yaml layers/ocr-models/config/
+                - cp $VENDOR_SRC/config/ndl.yaml layers/ocr-models/config/
+                - uv pip install --target layers/ocr-models/python onnxruntime==1.23.2 pillow==12.1.1 numpy==2.2.2 PyYAML==6.0.1 lxml==5.4.0 networkx==3.3 pyparsing==3.1.2 ordered-set==4.1.0 pypdfium2==4.30.0
+                - uv pip install onnxruntime lxml tqdm networkx pyparsing ordered-set
+                - uv run pytest tests/ -v
+
+            build:
+              commands:
+                - cd cdk && uv run cdk deploy --all --require-approval never --context stack_prefix=${StackPrefix} --context lambda_memory=${LambdaMemoryMB} --context lambda_timeout=${LambdaTimeoutSec}
+
+            post_build:
+              commands:
+                - LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name ${StackPrefix}-lambda --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' --output text 2>/dev/null || echo "N/A")
+                - aws sns publish --topic-arn ${!SNS_TOPIC_ARN} --subject "NDL-OCR Lite deployment complete" --message "Deployment successful. Lambda ARN:$LAMBDA_ARN. Configure your MCP client with the AgentCore Gateway endpoint."
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        EnvironmentVariables:
+          - Name: STACK_PREFIX
+            Value: !Ref StackPrefix
+          - Name: LAMBDA_MEMORY_MB
+            Value: !Ref LambdaMemoryMB
+          - Name: LAMBDA_TIMEOUT_SEC
+            Value: !Ref LambdaTimeoutSec
+          - Name: SNS_TOPIC_ARN
+            Value: !Ref NotificationTopic
+      Artifacts:
+        Type: NO_ARTIFACTS
+
+  # --- Lambda role for triggering CodeBuild ---
+  TriggerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${StackPrefix}-trigger-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StartCodeBuild
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !GetAtt CodeBuildProject.Arn
+
+  # --- Trigger Lambda (Custom Resource) ---
+  TriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${StackPrefix}-trigger'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt TriggerLambdaRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              if event['RequestType'] == 'Delete':
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  return
+
+              try:
+                  client = boto3.client('codebuild')
+                  response = client.start_build(
+                      projectName=event['ResourceProperties']['ProjectName']
+                  )
+                  build_id = response['build']['id']
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'BuildId': build_id
+                  })
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+
+  # --- Custom Resource to trigger build ---
+  TriggerBuild:
+    Type: Custom::TriggerBuild
+    Properties:
+      ServiceToken: !GetAtt TriggerFunction.Arn
+      ProjectName: !Ref CodeBuildProject
+
+Outputs:
+  CodeBuildProjectName:
+    Description: CodeBuild project name
+    Value: !Ref CodeBuildProject
+
+  NotificationTopicArn:
+    Description: SNS topic for deployment notifications
+    Value: !Ref NotificationTopic

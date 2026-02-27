@@ -1,0 +1,20 @@
+[
+  {
+    "name": "ocr_extract_text",
+    "description": "Extract text from an image or PDF using NDL-OCR Lite. Supports Japanese text including vertical writing. Returns per-line text with bounding boxes and confidence scores.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Base64-encoded image/PDF data or S3 URI (s3://bucket/key). Supports JPG, PNG, TIFF, JP2, BMP, and PDF."
+        },
+        "pages": {
+          "type": "string",
+          "description": "Page range for PDFs (e.g. '1-3', '1,3,5'). Default: all pages. Ignored for images."
+        }
+      },
+      "required": ["image"]
+    }
+  }
+]
