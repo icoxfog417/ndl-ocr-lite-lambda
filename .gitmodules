@@ -1,0 +1,3 @@
+[submodule "lambda/vendor/ndlocr-lite"]
+	path = lambda/vendor/ndlocr-lite
+	url = https://github.com/ndl-lab/ndlocr-lite.git
