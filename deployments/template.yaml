@@ -78,37 +78,46 @@ Resources:
       ServiceRole: !GetAtt CodeBuildRole.Arn
       TimeoutInMinutes: 30
       Source:
-        Type: GITHUB
-        Location: https://github.com/icoxfog417/ndl-ocr-lite-lambda.git
+        Type: NO_SOURCE
         # Buildspec is inlined so this template is fully self-contained.
+        # NO_SOURCE avoids needing GitHub OAuth — we clone manually.
         # ${!VAR} escapes shell variables from CloudFormation's !Sub resolution.
         BuildSpec: !Sub |
           version: 0.2
+          env:
+            variables:
+              REPO_DIR: /tmp/repo
           phases:
             install:
               runtime-versions:
                 nodejs: 18
                 python: 3.12
               commands:
+                - git clone --recursive https://github.com/icoxfog417/ndl-ocr-lite-lambda.git ${!REPO_DIR}
                 - npm install -g aws-cdk
                 - pip install uv
-                - git submodule update --init --recursive
-                - uv sync --group dev --group cdk
-                - cd cdk && uv sync && cd ..
+                - cd ${!REPO_DIR} && uv sync --group dev --group cdk
+                - cd ${!REPO_DIR}/cdk && uv sync
 
             pre_build:
               commands:
-                - uv pip install onnxruntime lxml tqdm networkx pyparsing ordered-set
-                - uv run pytest tests/ -v
+                - cd ${!REPO_DIR} && uv pip install onnxruntime lxml tqdm networkx pyparsing ordered-set
+                - cd ${!REPO_DIR} && uv run pytest tests/ -v
 
             build:
               commands:
-                - cd cdk && uv run cdk deploy --all --require-approval never --context stack_prefix=${StackPrefix} --context lambda_memory=${LambdaMemoryMB} --context lambda_timeout=${LambdaTimeoutSec}
+                - cd ${!REPO_DIR}/cdk && uv run cdk deploy --all --require-approval never --context stack_prefix=${StackPrefix} --context lambda_memory=${LambdaMemoryMB} --context lambda_timeout=${LambdaTimeoutSec}
 
             post_build:
               commands:
-                - LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name ${StackPrefix}-lambda --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' --output text 2>/dev/null || echo "N/A")
-                - aws sns publish --topic-arn ${!SNS_TOPIC_ARN} --subject "NDL-OCR Lite deployment complete" --message "Deployment successful. Lambda ARN:$LAMBDA_ARN. Configure your MCP client with the AgentCore Gateway endpoint."
+                - |
+                  if [ "${!CODEBUILD_BUILD_SUCCEEDING}" = "1" ]; then
+                    LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name ${StackPrefix}-lambda --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' --output text 2>/dev/null || echo "N/A")
+                    GW_ENDPOINT=$(aws cloudformation describe-stacks --stack-name ${StackPrefix}-gateway --query 'Stacks[0].Outputs[?OutputKey==`McpEndpointUrl`].OutputValue' --output text 2>/dev/null || echo "N/A")
+                    aws sns publish --topic-arn ${!SNS_TOPIC_ARN} --subject "NDL-OCR Lite deployment complete" --message "Deployment successful. MCP Endpoint: ${!GW_ENDPOINT} Lambda ARN: ${!LAMBDA_ARN}. Configure your MCP client with the endpoint above."
+                  else
+                    aws sns publish --topic-arn ${!SNS_TOPIC_ARN} --subject "NDL-OCR Lite deployment FAILED" --message "Deployment failed. Check CodeBuild logs for details: https://console.aws.amazon.com/codesuite/codebuild/projects/${StackPrefix}-deploy/build-history"
+                  fi
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_MEDIUM
