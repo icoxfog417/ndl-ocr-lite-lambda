@@ -53,18 +53,24 @@ class TestToolSchemaContract:
         with open(SCHEMA_PATH) as f:
             tools = json.load(f)
 
-        assert isinstance(tools, list) and len(tools) >= 1
-        tool = tools[0]
-        assert "name" in tool
-        assert "inputSchema" in tool
+        assert isinstance(tools, list) and len(tools) >= 2
+        tool_names = {t["name"] for t in tools}
+        assert "ocr_extract_text" in tool_names
+        assert "get_upload_url" in tool_names
 
-        props = tool["inputSchema"]["properties"]
-        required = tool["inputSchema"]["required"]
-
+        ocr_tool = next(t for t in tools if t["name"] == "ocr_extract_text")
+        props = ocr_tool["inputSchema"]["properties"]
+        required = ocr_tool["inputSchema"]["required"]
         assert "image" in props and props["image"]["type"] == "string"
         assert "pages" in props and props["pages"]["type"] == "string"
         assert "image" in required
         assert "pages" not in required
+
+        upload_tool = next(t for t in tools if t["name"] == "get_upload_url")
+        props = upload_tool["inputSchema"]["properties"]
+        required = upload_tool["inputSchema"]["required"]
+        assert "filename" in props and props["filename"]["type"] == "string"
+        assert "filename" in required
 
 
 # ---------------------------------------------------------------------------

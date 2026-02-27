@@ -1,13 +1,13 @@
 [
   {
     "name": "ocr_extract_text",
-    "description": "Extract text from an image or PDF using NDL-OCR Lite. Supports Japanese text including vertical writing. Returns per-line text with bounding boxes and confidence scores.",
+    "description": "Extract text from an image or PDF using NDL-OCR Lite. Supports Japanese text including vertical writing. Returns per-line text with bounding boxes and confidence scores. For large files, use get_upload_url first to upload via S3, then pass the s3_uri here.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "image": {
           "type": "string",
-          "description": "Base64-encoded image/PDF data or S3 URI (s3://bucket/key). Supports JPG, PNG, TIFF, JP2, BMP, and PDF."
+          "description": "Base64-encoded image/PDF data or S3 URI (s3://bucket/key). Supports JPG, PNG, TIFF, JP2, BMP, and PDF. For large files, use get_upload_url to get an S3 URI."
         },
         "pages": {
           "type": "string",
@@ -15,6 +15,20 @@
         }
       },
       "required": ["image"]
+    }
+  },
+  {
+    "name": "get_upload_url",
+    "description": "Get a presigned S3 URL for uploading large images or PDFs. Use this when the file is too large for base64 encoding. Upload the file to the returned upload_url with a PUT request, then pass the s3_uri to ocr_extract_text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Original filename (e.g. 'document.pdf', 'scan.png'). Used as the S3 object key suffix."
+        }
+      },
+      "required": ["filename"]
     }
   }
 ]

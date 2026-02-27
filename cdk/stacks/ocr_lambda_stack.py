@@ -119,6 +119,7 @@ class OcrLambdaStack(Stack):
             environment={
                 "LAMBDA_LAYER_DIR": "/mnt/models",
                 "NDLOCR_SRC_DIR": "/mnt/models/src",
+                "IMAGE_BUCKET": self.bucket.bucket_name,
                 # Add EFS python packages to PYTHONPATH
                 "PYTHONPATH": "/mnt/models/python",
             },
@@ -129,8 +130,8 @@ class OcrLambdaStack(Stack):
             # Warm invocations reuse module-level model objects regardless.
         )
 
-        # Grant S3 read access
-        self.bucket.grant_read(self.lambda_function)
+        # Grant S3 read/write access (write for presigned upload URLs)
+        self.bucket.grant_read_write(self.lambda_function)
 
         # --- EFS Provisioner (Custom Resource) ---
         # Populates EFS with vendor files and pip-installed dependencies.

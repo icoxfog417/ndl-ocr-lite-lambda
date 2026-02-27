@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 import shutil
 import traceback
+import uuid
 from typing import Any
 
+import boto3
 from yaml import safe_load
 
 # ---------------------------------------------------------------------------
@@ -77,22 +79,36 @@ recognizer100 = load_recognizer(
 # ---------------------------------------------------------------------------
 
 
-def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """Lambda entry point. Receives event from AgentCore Gateway.
+_BUCKET_NAME = os.environ.get("IMAGE_BUCKET", "")
+_s3_client = boto3.client("s3") if _BUCKET_NAME else None
 
-    Event format:
-        {
-            "image": "<base64 or s3://...>",
-            "pages": "1-3"  (optional, PDF only)
-        }
 
-    Returns:
-        {
-            "statusCode": 200,
-            "body": { "pages": [...] }
-        }
-    """
-    # Use request ID for unique /tmp subdirectory
+def _handle_get_upload_url(event: dict[str, Any]) -> dict[str, Any]:
+    """Generate a presigned S3 PUT URL for uploading large images."""
+    if not _BUCKET_NAME or not _s3_client:
+        return {"statusCode": 500, "body": {"error": "IMAGE_BUCKET not configured"}}
+
+    filename = event.get("filename", "image.png")
+    key = f"uploads/{uuid.uuid4()}/{filename}"
+    s3_uri = f"s3://{_BUCKET_NAME}/{key}"
+
+    presigned_url = _s3_client.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": _BUCKET_NAME, "Key": key},
+        ExpiresIn=300,
+    )
+
+    return {
+        "statusCode": 200,
+        "body": {
+            "upload_url": presigned_url,
+            "s3_uri": s3_uri,
+        },
+    }
+
+
+def _handle_ocr(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Run OCR on the provided image or PDF."""
     request_id: str = getattr(context, "aws_request_id", None) or "local"
     work_dir = os.path.join("/tmp", request_id)
 
@@ -129,6 +145,16 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "body": {"error": f"Internal error: {type(e).__name__}: {e!s}"},
         }
     finally:
-        # Clean up /tmp to prevent stale data on warm Lambda reuse
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Lambda entry point. Routes between OCR and upload URL tools.
+
+    If event has "filename" → generate presigned upload URL.
+    If event has "image" → run OCR.
+    """
+    if "filename" in event:
+        return _handle_get_upload_url(event)
+    return _handle_ocr(event, context)
