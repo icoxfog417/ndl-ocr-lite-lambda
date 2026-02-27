@@ -5,7 +5,7 @@ These tests catch integration issues across boundaries:
   - Tool schema matches what handler.py accepts/returns
   - CDK stacks produce the right CloudFormation resources
   - Gateway target routes to the Lambda alias (SnapStart)
-  - Buildspec copies the same files handler.py needs
+  - Vendor submodule has the files handler.py needs
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ LAMBDA_DIR = PROJECT_ROOT / "lambda"
 CDK_DIR = PROJECT_ROOT / "cdk"
 SCHEMA_PATH = CDK_DIR / "schemas" / "ocr-tool-schema.json"
 VENDOR_SRC = LAMBDA_DIR / "vendor" / "ndlocr-lite" / "src"
-TEMPLATE_PATH = PROJECT_ROOT / "deployments" / "template.yaml"
 
 sys.path.insert(0, str(CDK_DIR))
 
@@ -62,7 +61,6 @@ class TestToolSchemaContract:
         props = tool["inputSchema"]["properties"]
         required = tool["inputSchema"]["required"]
 
-        # handler.py reads event.get("image") and event.get("pages")
         assert "image" in props and props["image"]["type"] == "string"
         assert "pages" in props and props["pages"]["type"] == "string"
         assert "image" in required
@@ -70,12 +68,12 @@ class TestToolSchemaContract:
 
 
 # ---------------------------------------------------------------------------
-# Layer structure — vendor files must match what handler.py + buildspec need
+# Vendor files — must match what handler.py needs
 # ---------------------------------------------------------------------------
 
 
-class TestLayerStructure:
-    """Vendor submodule, handler, and buildspec must agree on file names."""
+class TestVendorFiles:
+    """Vendor submodule and handler must agree on file names."""
 
     def test_vendor_has_required_files(self) -> None:
         if not VENDOR_SRC.exists():
@@ -94,26 +92,6 @@ class TestLayerStructure:
         assert len(onnx_refs) == 4, f"Expected 4 ONNX refs, got {len(onnx_refs)}"
         assert "NDLmoji.yaml" in handler_src
         assert "ndl.yaml" in handler_src
-
-    def test_buildspec_copies_same_files(self) -> None:
-        content = TEMPLATE_PATH.read_text()
-        for module in ["ocr.py", "deim.py", "parseq.py", "ndl_parser.py"]:
-            assert module in content, f"Buildspec missing: {module}"
-        assert "reading_order" in content
-        assert "NDLmoji.yaml" in content
-        assert "ndl.yaml" in content
-
-    def test_buildspec_runs_tests_before_deploy(self) -> None:
-        content = TEMPLATE_PATH.read_text()
-        assert content.find("pytest") < content.find("cdk deploy")
-
-    def test_buildspec_installs_onnxruntime_for_tests(self) -> None:
-        """onnxruntime must be in the test env (not just the layer) for e2e tests."""
-        content = TEMPLATE_PATH.read_text()
-        # Layer install (--target) is for Lambda runtime
-        assert "--target layers/ocr-models/python onnxruntime" in content
-        # Separate install (no --target) is for the test venv
-        assert "uv pip install onnxruntime" in content
 
 
 # ---------------------------------------------------------------------------
@@ -136,45 +114,48 @@ class TestOcrLambdaStack:
         )
         return assertions.Template.from_stack(stack)
 
-    def test_lambda_runtime_and_snapstart(self, template) -> None:
+    def test_lambda_memory_and_timeout(self, template) -> None:
         template.has_resource_properties(
             "AWS::Lambda::Function",
             {
-                "Runtime": "python3.12",
                 "MemorySize": 3008,
                 "Timeout": 60,
-                "SnapStart": {"ApplyOn": "PublishedVersions"},
             },
         )
 
-    def test_lambda_env_vars(self, template) -> None:
-        template.has_resource_properties(
-            "AWS::Lambda::Function",
-            {
-                "Environment": {
-                    "Variables": assertions.Match.object_like({
-                        "LAMBDA_LAYER_DIR": "/opt",
-                        "NDLOCR_SRC_DIR": "/opt/src",
-                    })
-                }
-            },
-        )
-
-    def test_version_and_alias_for_snapstart(self, template) -> None:
-        """SnapStart requires a published version + alias (not $LATEST)."""
+    def test_version_and_alias(self, template) -> None:
         template.resource_count_is("AWS::Lambda::Version", 1)
         template.resource_count_is("AWS::Lambda::Alias", 1)
         template.has_resource_properties(
             "AWS::Lambda::Alias", {"Name": "live"},
         )
 
-    def test_layer_attached(self, template) -> None:
-        template.resource_count_is("AWS::Lambda::LayerVersion", 1)
+    def test_efs_file_system(self, template) -> None:
+        """EFS must be created for model storage."""
+        template.resource_count_is("AWS::EFS::FileSystem", 1)
+        template.has_resource_properties(
+            "AWS::EFS::FileSystem", {"Encrypted": True},
+        )
 
-    def test_lambda_code_excludes_vendor(self) -> None:
-        """Lambda code asset must exclude vendor/ (models are in the Layer)."""
+    def test_efs_access_point(self, template) -> None:
+        template.resource_count_is("AWS::EFS::AccessPoint", 1)
+
+    def test_vpc_created(self, template) -> None:
+        template.resource_count_is("AWS::EC2::VPC", 1)
+
+    def test_efs_provisioner(self, template) -> None:
+        """Provisioner Custom Resource must exist to populate EFS."""
+        template.resource_count_is("AWS::CloudFormation::CustomResource", 1)
+
+    def test_lambda_functions(self, template) -> None:
+        """OCR handler + EFS provisioner + S3 auto-delete helper."""
+        template.resource_count_is("AWS::Lambda::Function", 3)
+
+    def test_uses_efs_for_models(self) -> None:
+        """CDK stack must use EFS mount, not layer, for models."""
         stack_src = (CDK_DIR / "stacks" / "ocr_lambda_stack.py").read_text()
-        assert '"vendor"' in stack_src and "exclude" in stack_src
+        assert "/mnt/models" in stack_src
+        assert "FileSystem.from_efs_access_point" in stack_src
 
     def test_s3_bucket_secured(self, template) -> None:
         template.has_resource_properties(
@@ -237,7 +218,6 @@ class TestGatewayStack:
         template.resource_count_is("AWS::Cognito::UserPoolClient", 1)
 
     def test_schema_file_path_resolves(self) -> None:
-        """gateway_stack.py computes schema path via os.path — verify it works."""
         computed = CDK_DIR / "schemas" / "ocr-tool-schema.json"
         assert computed.exists()
         with open(computed) as f:
